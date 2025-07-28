@@ -1,0 +1,5 @@
+msal
+pandas
+streamlit
+requests
+google
