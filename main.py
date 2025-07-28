@@ -42,7 +42,7 @@ def get_access_token(tenant_id, client_id, client_secret):
 def get_drive_children_cached(_drive_id, item_id, headers):
     """
     Fetches and caches children of a specific folder (item_id) in a drive.
-    This function is key to the lazy-loading approach. It now also fetches the downloadUrl.
+    This function is key to the lazy-loading approach.
     """
     url = f"https://graph.microsoft.com/v1.0/drives/{_drive_id}/items/{item_id}/children"
     try:
@@ -61,7 +61,6 @@ def get_drive_children_cached(_drive_id, item_id, headers):
 def get_file_content_from_url_cached(download_url):
     """
     Fetches and caches the content of a specific file using its pre-authenticated download URL.
-    Note: The download URL is short-lived. If the app is idle for too long, this may fail.
     """
     if not download_url:
         st.error("Download URL is missing.")
@@ -88,20 +87,24 @@ def display_breadcrumbs():
     for i, (name, item_id) in enumerate(path_items):
         with cols[i]:
             if st.button(f"▸ {name}", key=f"crumb_{item_id}"):
-                # On click, truncate the path to the clicked level and rerun
+                # On click, truncate the path and clear download state
                 st.session_state.path = st.session_state.path[:i + 1]
+                clear_download_state() # Reset download state on navigation
                 st.rerun()
     st.markdown("---")
 
 
+def clear_download_state():
+    """Callback function to clear the download state."""
+    st.session_state.download_target_id = None
+
+
 def display_folder_contents(drive_id, headers, item_id, folder_name):
     """
-    Displays the contents of a single folder. This is NOT recursive.
-    It relies on session_state to manage navigation.
+    Displays the contents of a single folder, replacing the download button in-place.
     """
     with st.spinner(f"Loading contents of '{folder_name}'..."):
         children = get_drive_children_cached(drive_id, item_id, headers)
-        print(children)
 
     if not children:
         st.info("_(This folder is empty)_")
@@ -110,7 +113,7 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
     # Separate and sort folders and files
     folders = sorted([item for item in children if "folder" in item], key=lambda x: x['name'])
     files = sorted([item for item in children if "file" in item], key=lambda x: x['name'])
-    print(files)
+
     # Display folders first
     for folder in folders:
         col1, col2 = st.columns([0.8, 0.2])
@@ -118,8 +121,8 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
             st.write(f"📁 {folder['name']}")
         with col2:
             if st.button("Open", key=f"open_{folder['id']}", help=f"Open {folder['name']}"):
-                # Add the new folder to the path and rerun to navigate into it
                 st.session_state.path.append((folder['name'], folder['id']))
+                clear_download_state() # Reset download state on navigation
                 st.rerun()
 
     # Display files next
@@ -127,8 +130,8 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
     for file_item in files:
         col1, col2, col3 = st.columns([0.7, 0.2, 0.1])
         file_name = file_item['name']
+        file_id = file_item['id']
 
-        # Format file size to be more readable
         file_size_bytes = file_item.get('size', 0)
         if file_size_bytes < 1024:
             file_size_str = f"{file_size_bytes} B"
@@ -142,24 +145,36 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
         with col2:
             st.write(f"_{file_size_str}_")
         with col3:
-            if st.button("Download", key=f"download_{file_item['id']}", help=f"Download {file_name}"):
-                with st.spinner(f"Preparing {file_name} for download..."):
-                    print(file_item)
+            # Check if this file is the one targeted for download
+            if st.session_state.get('download_target_id') == file_id:
+                with st.spinner("Preparing..."):
                     download_url = file_item.get('@microsoft.graph.downloadUrl')
                     if download_url:
                         content = get_file_content_from_url_cached(download_url)
-                        if content is not None:
-                            st.session_state.download_data = content
-                            st.session_state.download_file_name = file_name
-                            st.rerun()
+                        if content:
+                            st.download_button(
+                                label="✅ Save",
+                                data=content,
+                                file_name=file_name,
+                                mime='application/octet-stream',
+                                key=f"final_dl_{file_id}",
+                                on_click=clear_download_state,
+                                help=f"Click to save {file_name}"
+                            )
+                        else:
+                            st.error("Download failed.")
+                            if st.button("Retry", key=f"retry_{file_id}", on_click=clear_download_state):
+                                st.rerun()
                     else:
-                        st.error(f"Could not find a download URL for {file_name}. Check API permissions.")
-
-
-def clear_download_state():
-    """Callback function to clear download state after the button is clicked."""
-    st.session_state.download_data = None
-    st.session_state.download_file_name = None
+                        st.error("URL not found.")
+                        if st.button("OK", key=f"ok_err_{file_id}", on_click=clear_download_state):
+                           st.rerun()
+            else:
+                # Default "Download" button
+                if st.button("Download", key=f"download_{file_id}", help=f"Download {file_name}"):
+                    # Set this file as the target and rerun
+                    st.session_state.download_target_id = file_id
+                    st.rerun()
 
 
 def main():
@@ -168,12 +183,9 @@ def main():
 
     # --- Initialize session state ---
     if 'path' not in st.session_state:
-        # The path is a list of tuples: (folder_name, folder_id)
         st.session_state.path = [("Root", "root")]
-    if 'download_data' not in st.session_state:
-        st.session_state.download_data = None
-    if 'download_file_name' not in st.session_state:
-        st.session_state.download_file_name = None
+    if 'download_target_id' not in st.session_state:
+        st.session_state.download_target_id = None
 
     # --- Load Configuration from Secrets ---
     try:
@@ -205,17 +217,6 @@ def main():
         """)
         st.stop()
 
-    # --- Handle the download button logic at the top level ---
-    # This button will now persist until clicked, thanks to the on_click callback.
-    if st.session_state.download_data is not None:
-        st.download_button(
-            label=f"✅ Click to save '{st.session_state.download_file_name}'",
-            data=st.session_state.download_data,
-            file_name=st.session_state.download_file_name,
-            mime='application/octet-stream',
-            on_click=clear_download_state
-        )
-
     # --- Authenticate and Display ---
     with st.spinner("Authenticating with Microsoft Graph API..."):
         access_token = get_access_token(tenant_id, client_id, client_secret)
@@ -228,14 +229,9 @@ def main():
         headers = {'Authorization': f"Bearer {access_token}"}
 
         st.header(f"File Explorer")
-
-        # Display breadcrumbs for navigation
         display_breadcrumbs()
 
-        # Get the current location from the end of the path
         current_folder_name, current_item_id = st.session_state.path[-1]
-
-        # Display the contents of the current folder
         display_folder_contents(drive_id, headers, current_item_id, current_folder_name)
 
     else:
