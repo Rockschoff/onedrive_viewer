@@ -10,7 +10,6 @@ st.set_page_config(
     layout="wide",
 )
 
-
 # --- MSAL Authentication & Graph API Functions ---
 
 def get_access_token(tenant_id, client_id, client_secret):
@@ -35,14 +34,12 @@ def get_access_token(tenant_id, client_id, client_secret):
         st.error(f"Authentication Failed: {result.get('error_description', 'No error description.')}")
         return None
 
-
 # --- Cached API Functions for Efficiency ---
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_drive_children_cached(_drive_id, item_id, headers):
     """
     Fetches and caches children of a specific folder (item_id) in a drive.
-    This function is key to the lazy-loading approach.
     """
     url = f"https://graph.microsoft.com/v1.0/drives/{_drive_id}/items/{item_id}/children"
     try:
@@ -56,7 +53,6 @@ def get_drive_children_cached(_drive_id, item_id, headers):
         st.error(f"An unexpected error occurred while fetching children: {e}")
         return []
 
-
 @st.cache_data(ttl=600, show_spinner=False)
 def get_file_content_from_url_cached(download_url):
     """
@@ -66,7 +62,6 @@ def get_file_content_from_url_cached(download_url):
         st.error("Download URL is missing.")
         return None
     try:
-        # Pre-authenticated download URLs from Graph API do not need an Authorization header.
         resp = requests.get(download_url)
         resp.raise_for_status()
         return resp.content
@@ -77,8 +72,21 @@ def get_file_content_from_url_cached(download_url):
         st.error(f"An unexpected error occurred while fetching file content: {e}")
         return None
 
+@st.cache_data(ttl=600, show_spinner=False)
+def get_sharepoint_fields_cached(drive_id, item_id, headers):
+    """
+    Fetches and caches SharePoint listItem.fields for a drive item.
+    """
+    url = (
+        f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+        f"/items/{item_id}"
+        f"?$expand=listItem($expand=fields)"
+    )
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.json().get("listItem", {}).get("fields", {})
 
-# --- Streamlit UI Components (Stateful, Non-Recursive) ---
+# --- Streamlit UI Components ---
 
 def display_breadcrumbs():
     """Displays the navigation breadcrumbs and handles navigation."""
@@ -87,9 +95,8 @@ def display_breadcrumbs():
     for i, (name, item_id) in enumerate(path_items):
         with cols[i]:
             if st.button(f"▸ {name}", key=f"crumb_{item_id}"):
-                # On click, truncate the path and clear download state
                 st.session_state.path = st.session_state.path[:i + 1]
-                clear_download_state() # Reset download state on navigation
+                clear_download_state()
                 st.rerun()
     st.markdown("---")
 
@@ -100,9 +107,7 @@ def clear_download_state():
 
 
 def display_folder_contents(drive_id, headers, item_id, folder_name):
-    """
-    Displays the contents of a single folder, replacing the download button in-place.
-    """
+    """Displays folder contents, including QC Document Number metadata."""
     with st.spinner(f"Loading contents of '{folder_name}'..."):
         children = get_drive_children_cached(drive_id, item_id, headers)
 
@@ -110,11 +115,10 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
         st.info("_(This folder is empty)_")
         return
 
-    # Separate and sort folders and files
-    folders = sorted([item for item in children if "folder" in item], key=lambda x: x['name'])
-    files = sorted([item for item in children if "file" in item], key=lambda x: x['name'])
+    folders = sorted([c for c in children if 'folder' in c], key=lambda x: x['name'])
+    files = sorted([c for c in children if 'file' in c], key=lambda x: x['name'])
 
-    # Display folders first
+    # Folders first
     for folder in folders:
         col1, col2 = st.columns([0.8, 0.2])
         with col1:
@@ -122,30 +126,33 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
         with col2:
             if st.button("Open", key=f"open_{folder['id']}", help=f"Open {folder['name']}"):
                 st.session_state.path.append((folder['name'], folder['id']))
-                clear_download_state() # Reset download state on navigation
+                clear_download_state()
                 st.rerun()
 
-    # Display files next
-    st.markdown("---" if folders and files else "")
+    if folders and files:
+        st.markdown("---")
+
+    # Files and metadata
     for file_item in files:
-        col1, col2, col3 = st.columns([0.7, 0.2, 0.1])
-        file_name = file_item['name']
         file_id = file_item['id']
+        fields = get_sharepoint_fields_cached(drive_id, file_id, headers)
+        qc_number = fields.get('QCDocumentNumber', "-")
 
-        file_size_bytes = file_item.get('size', 0)
-        if file_size_bytes < 1024:
-            file_size_str = f"{file_size_bytes} B"
-        elif file_size_bytes < 1024 ** 2:
-            file_size_str = f"{file_size_bytes / 1024:.1f} KB"
-        else:
-            file_size_str = f"{file_size_bytes / 1024 ** 2:.1f} MB"
-
+        col1, col2, col3, col4 = st.columns([0.6, 0.2, 0.15, 0.05])
         with col1:
-            st.write(f"📄 {file_name}")
+            st.write(f"📄 {file_item['name']}")
         with col2:
-            st.write(f"_{file_size_str}_")
+            size = file_item.get('size', 0)
+            if size < 1024:
+                size_str = f"{size} B"
+            elif size < 1024**2:
+                size_str = f"{size/1024:.1f} KB"
+            else:
+                size_str = f"{size/1024**2:.1f} MB"
+            st.write(f"_{size_str}_")
         with col3:
-            # Check if this file is the one targeted for download
+            st.write(qc_number)
+        with col4:
             if st.session_state.get('download_target_id') == file_id:
                 with st.spinner("Preparing..."):
                     download_url = file_item.get('@microsoft.graph.downloadUrl')
@@ -155,11 +162,11 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
                             st.download_button(
                                 label="✅ Save",
                                 data=content,
-                                file_name=file_name,
+                                file_name=file_item['name'],
                                 mime='application/octet-stream',
                                 key=f"final_dl_{file_id}",
                                 on_click=clear_download_state,
-                                help=f"Click to save {file_name}"
+                                help=f"Click to save {file_item['name']}"
                             )
                         else:
                             st.error("Download failed.")
@@ -168,26 +175,23 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
                     else:
                         st.error("URL not found.")
                         if st.button("OK", key=f"ok_err_{file_id}", on_click=clear_download_state):
-                           st.rerun()
+                            st.rerun()
             else:
-                # Default "Download" button
-                if st.button("Download", key=f"download_{file_id}", help=f"Download {file_name}"):
-                    # Set this file as the target and rerun
+                if st.button("Download", key=f"download_{file_id}", help=f"Download {file_item['name']}"):
                     st.session_state.download_target_id = file_id
                     st.rerun()
 
 
 def main():
-    """Main function to run the Streamlit application."""
     st.title("☁️ Efficient OneDrive Explorer")
 
-    # --- Initialize session state ---
+    # Init session state
     if 'path' not in st.session_state:
         st.session_state.path = [("Root", "root")]
     if 'download_target_id' not in st.session_state:
         st.session_state.download_target_id = None
 
-    # --- Load Configuration from Secrets ---
+    # Load secrets
     try:
         tenant_id = st.secrets["TENANT_ID"]
         client_id = st.secrets["APPLICATION_ID"]
@@ -197,47 +201,38 @@ def main():
     except KeyError:
         credentials_found = False
 
-    # --- Main Content Area ---
     if not credentials_found:
         st.error("Required credentials not found in st.secrets.")
         st.info("Please configure your secrets for deployment.")
         st.markdown("""
-        To run this app, you need to set up your credentials. If running locally, create a 
-        `.streamlit/secrets.toml` file in your project directory.
-
         **Example `secrets.toml`:**
         ```toml
-        # MS Graph API Credentials
         TENANT_ID = "your-tenant-id"
         APPLICATION_ID = "your-application-id"
         CLIENT_SECRET = "your-client-secret"
         DRIVE_ID = "your-drive-id"
         ```
-        When deploying to Streamlit Community Cloud, copy the contents of this file into the app's secrets manager.
         """)
         st.stop()
 
-    # --- Authenticate and Display ---
     with st.spinner("Authenticating with Microsoft Graph API..."):
         access_token = get_access_token(tenant_id, client_id, client_secret)
 
     if access_token:
         st.sidebar.success("✅ Authentication Successful")
-        st.sidebar.markdown(f"**Drive ID:**")
-        st.sidebar.code(drive_id, language=None)
+        st.sidebar.markdown("**Drive ID:**")
+        st.sidebar.code(drive_id)
 
         headers = {'Authorization': f"Bearer {access_token}"}
 
-        st.header(f"File Explorer")
+        st.header("File Explorer")
         display_breadcrumbs()
 
         current_folder_name, current_item_id = st.session_state.path[-1]
         display_folder_contents(drive_id, headers, current_item_id, current_folder_name)
-
     else:
         st.error("Could not authenticate. Check credentials and API permissions.")
         st.stop()
-
 
 if __name__ == "__main__":
     main()
