@@ -35,23 +35,32 @@ def get_access_token(tenant_id, client_id, client_secret):
         return None
 
 # --- Cached API Functions for Efficiency ---
-
 @st.cache_data(ttl=600, show_spinner=False)
 def get_drive_children_cached(_drive_id, item_id, headers):
     """
-    Fetches and caches children of a specific folder (item_id) in a drive.
+    Fetches and caches ALL children of a specific folder (item_id) in a drive,
+    following @odata.nextLink pagination.
     """
     url = f"https://graph.microsoft.com/v1.0/drives/{_drive_id}/items/{item_id}/children"
+    items = []
+
     try:
-        resp = requests.get(url, headers=headers)
-        resp.raise_for_status()
-        return resp.json().get("value", [])
+        while url:
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            items.extend(data.get("value", []))
+            url = data.get("@odata.nextLink") # follow pagination until exhausted
+
+        return items
+
     except requests.exceptions.RequestException as e:
         st.error(f"API Error fetching children for item {item_id}: {e}")
-        return []
+        return items
     except Exception as e:
         st.error(f"An unexpected error occurred while fetching children: {e}")
-        return []
+        return items
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_file_content_from_url_cached(download_url):
@@ -104,10 +113,12 @@ def display_breadcrumbs():
 def clear_download_state():
     """Callback function to clear the download state."""
     st.session_state.download_target_id = None
+
 HIDE_PREFIXES = ("MEX-", "NIA-")
 
 def _is_hidden_at_root(name: str, item_id: str) -> bool:
     # Only hide in the root; case-insensitive on the name
+    # print(name.upper() , name.upper().startswith(HIDE_PREFIXES))
     return item_id == "root" and name.upper().startswith(HIDE_PREFIXES)
 
 def display_folder_contents(drive_id, headers, item_id, folder_name):
@@ -118,11 +129,12 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
     if not children:
         st.info("_(This folder is empty)_")
         return
+
     folders = [
         c for c in children
         if "folder" in c and not _is_hidden_at_root(c.get("name", ""), item_id)
     ]
-    folders = sorted([c for c in children if 'folder' in c], key=lambda x: x['name'])
+    folders = sorted([c for c in folders if 'folder' in c], key=lambda x: x['name'])
     files = sorted([c for c in children if 'file' in c], key=lambda x: x['name'])
 
     # Folders first
