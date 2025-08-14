@@ -104,7 +104,11 @@ def display_breadcrumbs():
 def clear_download_state():
     """Callback function to clear the download state."""
     st.session_state.download_target_id = None
+HIDE_PREFIXES = ("MEX-", "NIA-")
 
+def _is_hidden_at_root(name: str, item_id: str) -> bool:
+    # Only hide in the root; case-insensitive on the name
+    return item_id == "root" and name.upper().startswith(HIDE_PREFIXES)
 
 def display_folder_contents(drive_id, headers, item_id, folder_name):
     """Displays folder contents, including QC Document Number metadata."""
@@ -114,7 +118,10 @@ def display_folder_contents(drive_id, headers, item_id, folder_name):
     if not children:
         st.info("_(This folder is empty)_")
         return
-
+    folders = [
+        c for c in children
+        if "folder" in c and not _is_hidden_at_root(c.get("name", ""), item_id)
+    ]
     folders = sorted([c for c in children if 'folder' in c], key=lambda x: x['name'])
     files = sorted([c for c in children if 'file' in c], key=lambda x: x['name'])
 
